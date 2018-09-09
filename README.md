@@ -85,8 +85,6 @@ enable Hamming correction and detection to module
 
 create a background memory scrubber for the structure
 
-maybe drop down to ARM assembly to do some optimized 128-bit operations (NEON SIMD is the only instruction set on satellte that does 128-bits AFAIK), not a priority
-
 more benchmarking
 
 possibly add a second parity bit to Hamming code sets, converting to a SECDED code (single error correction, double error detection), but what are the odds that we would have fried already at that point?
