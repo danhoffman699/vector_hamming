@@ -1,0 +1,40 @@
+I made my own version of a binary tree search.
+
+hamming_page_t is stored at the 32nd depth, everything above is just two void pointers (hamming_node_t)
+
+hamming_subtree_t is the universal type for addressing information, containing the following
+	1. id: path taken so far (left/right chosen by !!(id & mask), where mask is one byte, starting at MSB and moving to LSB)
+		a. !! is the universal way of binding a value to 1 or 0, full expression is child[!!(id & mask)], size of 2
+	2. proceesed_bits: depth in the tree (i.e. number of bits in ID that are valid, so we don't assume an all false path)
+	3. ptr: double void pointer to the parent's pointer to the child (done to simplify deletions)
+
+hamming_tree_resolve can resolve an array of hamming_subtree_ts, and is passed an array of bool (equal length) telling it whether it should create the new path along the way, or return NULL if the path has not already been created. It is also passed a hamming_subtree_t which acts as the head of the tree. Any target that can't be found with this function should check if it is a child of the parent tree passed.
+
+The head of the tree passed can be the actual head of the tree, but we can optimize this one of two ways
+	1. Compute a practical head based off the max sector size (gives us a depth of ~17 with the test size of 64 MB)
+	2. Track writes and do the following
+		a. If the practical head is NULL, set it to the subtree just written
+		b. If the practical head is not NULL, set it to the LCU of the practical HEAD and the data just written
+
+Second approach is very dynamic, and can actually shrink if we put a mutex on the tree itself and delete any pages that have all zeroes. This zero-page check should probably only be ran on pages with REQ_OP_WRITE_ZEROES. IIRC there was a security/debugging feature which blanked all RAM after being freed, so enabling that might drastically reduce the amount of RAM needed to maintain the block device down to just whatever RAM is stored at the moment.
+
+There are a few major motivations for resolving multiple subtrees with one call:
+	1. Processing bio (block IO) requests with one tree traversal with multiple forks towards the very bottom, versus multiple complete tree traversals that have pointers cached in the TLB after the first call
+	2. Reverse engineering Linux swap read/write patterns so we can create an estimated guess of the LCA between the current tree ID and the next read/write and attach that estimate to the call for the data requested now
+	3. Rolling my own version allows me to be pedantic about architecture-specific optimizations and access patterns in general, since the mission itself will be running on ARMv8, and I don't think the native build setup runs with -march=native
+		a. Of course, there needs to be a good reason to use some of these dank instructions, and the only case I can think of is with the Hamming code computations themselves, since the tree is pretty basic
+
+I have not collected any solid numbers on Linux swap read/write patterns, but I'm assuming the swap subsystem makes two assumptions (which are true for HDDs, and swapping with flash memory isn't done in production)
+	1. Reads and writes are faster as sector numbers increase (more platter surface area is spinning the farther out you go
+	2. It is good to minimize seek times
+
+Assuming these are true, then we can very easily store a least universal ancestor guess as a pointer and check that it is correct on the next read (checking is two shifts and a greater than or equal in hamming_subtree_t, so it's fairly optimized).
+
+NOTES
+	Path taken is defined by SECTOR_TO_PAGE(), and the offset in the leaf node is defined by SECTOR_TO_CHUNK(). Since the offset in the leaf node isn't bearning on the format of the tree itself, we don't have to restrict ourselves to whole number divisors of 32, so long as we adjust the SECTOR_TO_CHUNK() macro to take off at least 32 mod [computed bits per edge] bits.
+
+	Cortex-A9 has a cache length of 8 words, so processing 3 bits per level seems to be the best option. This allows SECTOR_TO_CHUNK() to use 2+(3*i) for the CHUNK (i >= 0). Given i is 1, (2^(2+(3*i)))*512 is four sets of four pages (16K), which seems to be reasonable. Codes should probably be computed over individual pages still, since sequential pages on HDD aren't inherently related, and redundant computations are something we are trying to avoid (percentage of new data is higher if we restrict codes to the lowest unit that makes sense, pages. Linux does seem to store pages in chunks of 8 sectors, but I don't know if the positions are divisors of 8 or not, makes sense they would be).
+
+	A normal traversal down the tree will take (32-(2+(3*1)))/3 hops (9), assuming we start at the head of the tree. In actual deployment code, however, we shouldn't ever start at the absolute head of the tree, since it is impossible to write to sectors outside of the advertised size. If we advertise a size between 256MB and 512MB (2^28 and 2^29), we can get away with 8 in an absolute worst case scenario.
+
+	A really interesting approach is using statistics (and hacky cool optimizations) to quickly generate subtrees based on confidence intervals. (68, 95, 99.7). Again, since verification is easy, we can store multiple (the cost comes at the subtreeing code that manages forking, overhead can be large if not managed properly).
